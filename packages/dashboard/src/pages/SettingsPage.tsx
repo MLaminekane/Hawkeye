@@ -17,6 +17,7 @@ const DEFAULT_DRIFT = {
   warningThreshold: 60,
   criticalThreshold: 30,
   contextWindow: 10,
+  autoPause: false,
 };
 
 const DEFAULT_RULES: GuardrailRule[] = [
@@ -68,7 +69,7 @@ export function SettingsPage() {
   // Load settings + provider list from API
   useEffect(() => {
     api.getSettings().then((data) => {
-      if (data.drift) setDriftConfig(data.drift);
+      if (data.drift) setDriftConfig({ ...DEFAULT_DRIFT, ...data.drift });
       if (data.guardrails) setRules(data.guardrails);
     }).catch(() => setLoadError('Could not load settings from server'));
 
@@ -212,6 +213,14 @@ export function SettingsPage() {
             <Field label="Context window" value={String(driftConfig.contextWindow)} onChange={(v) => { setDriftConfig((p) => ({ ...p, contextWindow: parseInt(v) || 10 })); setSaved(false); }} type="number" />
             <Field label="Warning threshold" value={String(driftConfig.warningThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, warningThreshold: parseInt(v) || 60 })); setSaved(false); }} type="number" />
             <Field label="Critical threshold" value={String(driftConfig.criticalThreshold)} onChange={(v) => { setDriftConfig((p) => ({ ...p, criticalThreshold: parseInt(v) || 30 })); setSaved(false); }} type="number" />
+
+            <div className="col-span-2 flex items-center gap-3 pt-2 border-t border-hawk-border/50">
+              <Toggle enabled={driftConfig.autoPause ?? false} onToggle={() => { setDriftConfig((p) => ({ ...p, autoPause: !p.autoPause })); setSaved(false); }} />
+              <div>
+                <span className="font-mono text-xs text-hawk-text">Auto-pause on critical drift</span>
+                <p className="font-mono text-[10px] text-hawk-text3">Automatically pause recording when drift score drops to critical level</p>
+              </div>
+            </div>
           </div>
         )}
       </div>

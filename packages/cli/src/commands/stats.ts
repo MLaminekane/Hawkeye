@@ -5,9 +5,9 @@ import chalk from 'chalk';
 import { Storage } from '@hawkeye/core';
 
 export const statsCommand = new Command('stats')
-  .description('Show statistics for a session')
-  .argument('<session-id>', 'Session ID (full or prefix)')
-  .action((sessionId: string) => {
+  .description('Show statistics for a session, or global stats if no session given')
+  .argument('[session-id]', 'Session ID (full or prefix). Omit for global stats')
+  .action((sessionId: string | undefined) => {
     const dbPath = join(process.cwd(), '.hawkeye', 'traces.db');
 
     if (!existsSync(dbPath)) {
@@ -16,6 +16,12 @@ export const statsCommand = new Command('stats')
     }
 
     const storage = new Storage(dbPath);
+
+    if (!sessionId) {
+      showGlobalStats(storage);
+      storage.close();
+      return;
+    }
 
     // Support short IDs: find the matching session
     const resolved = resolveSessionId(storage, sessionId);
@@ -118,6 +124,37 @@ export const statsCommand = new Command('stats')
 
     console.log('');
   });
+
+function showGlobalStats(storage: Storage): void {
+  const result = storage.getGlobalStats();
+  if (!result.ok) {
+    console.error(chalk.red('Failed to compute global stats.'));
+    return;
+  }
+
+  const g = result.value;
+  const driftColor = g.avg_drift_score >= 70 ? chalk.green : g.avg_drift_score >= 40 ? chalk.yellow : chalk.red;
+
+  console.log('');
+  console.log(chalk.bold('Global Statistics'));
+  console.log(chalk.dim('─'.repeat(50)));
+  console.log(`  Total Sessions:   ${chalk.white(String(g.total_sessions))}`);
+  console.log(`    Completed:      ${chalk.green(String(g.completed_sessions))}`);
+  console.log(`    Active:         ${chalk.yellow(String(g.active_sessions))}`);
+  console.log(`    Aborted:        ${chalk.red(String(g.aborted_sessions))}`);
+  console.log('');
+  console.log(`  Total Actions:    ${chalk.white(String(g.total_actions))}`);
+  console.log(`  Total Cost:       ${chalk.yellow('$' + g.total_cost_usd.toFixed(4))}`);
+  console.log(`  Total Tokens:     ${chalk.white(g.total_tokens.toLocaleString())}`);
+  console.log(`  Avg Drift Score:  ${driftColor(g.avg_drift_score.toFixed(0) + '/100')}`);
+
+  if (g.first_session) {
+    console.log('');
+    console.log(`  First Session:    ${chalk.dim(new Date(g.first_session).toLocaleString())}`);
+    console.log(`  Last Session:     ${chalk.dim(new Date(g.last_session!).toLocaleString())}`);
+  }
+  console.log('');
+}
 
 function resolveSessionId(storage: Storage, input: string): string | null {
   // Try exact match first

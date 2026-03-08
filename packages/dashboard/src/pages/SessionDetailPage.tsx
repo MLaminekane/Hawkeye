@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   ReferenceArea,
 } from 'recharts';
-import { api, type SessionData, type EventData, type DriftSnapshot } from '../api';
+import { api, hawkeyeWs, type SessionData, type EventData, type DriftSnapshot } from '../api';
 
 // ─── Event type config ───
 const EVENT_TYPE_CONFIG: Record<string, { label: string; bg: string; text: string }> = {
@@ -42,21 +42,35 @@ export function SessionDetailPage() {
 
   useEffect(() => {
     if (!id) return;
-    const load = () => {
-      Promise.all([
-        api.getSession(id),
-        api.getEvents(id),
-        api.getDriftSnapshots(id),
-      ]).then(([s, e, d]) => {
-        setSession(s);
-        setEvents(e);
-        setDriftSnapshots(d);
-        setLoading(false);
-      }).catch(() => setLoading(false));
-    };
-    load();
-    const interval = setInterval(load, 3000);
-    return () => clearInterval(interval);
+    // Initial fetch
+    Promise.all([
+      api.getSession(id),
+      api.getEvents(id),
+      api.getDriftSnapshots(id),
+    ]).then(([s, e, d]) => {
+      setSession(s);
+      setEvents(e);
+      setDriftSnapshots(d);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+
+    // Real-time via WebSocket
+    const unsub = hawkeyeWs.subscribe((msg) => {
+      if (msg.type === 'event' && msg.sessionId === id) {
+        setEvents((prev) => {
+          if (prev.some((e) => e.id === msg.event.id)) return prev;
+          return [...prev, msg.event];
+        });
+      }
+      if (msg.type === 'drift_update' && msg.sessionId === id) {
+        setDriftSnapshots((prev) => [
+          ...prev,
+          { id: `ws-${Date.now()}`, score: msg.score, flag: msg.flag, reason: msg.reason, created_at: new Date().toISOString() },
+        ]);
+      }
+    });
+
+    return () => { unsub(); };
   }, [id]);
 
   // Filtered events

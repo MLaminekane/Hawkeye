@@ -1,23 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap');
+/* Dark theme (default) */
+html.dark {
+  --hawk-bg: #09090B;
+  --hawk-surface: #16161D;
+  --hawk-surface2: #1E1E28;
+  --hawk-surface3: #262632;
+  --hawk-border: #2A2A3A;
+  --hawk-text: #E8E8ED;
+  --hawk-text2: #9898A8;
+  --hawk-text3: #5A5A6E;
+}
+
+/* Light theme */
+html.light {
+  --hawk-bg: #F8F8FA;
+  --hawk-surface: #FFFFFF;
+  --hawk-surface2: #F0F0F5;
+  --hawk-surface3: #E4E4EC;
+  --hawk-border: #D0D0DE;
+  --hawk-text: #1A1A2E;
+  --hawk-text2: #5A5A70;
+  --hawk-text3: #8888A0;
+}
 
 body {
-  background-color: #09090B;
-  color: #E8E8ED;
+  background-color: var(--hawk-bg);
+  color: var(--hawk-text);
   font-family: 'DM Sans', sans-serif;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.2s, color 0.2s;
 }
 
 ::-webkit-scrollbar {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #16161D;
+  background: var(--hawk-surface);
 }
 ::-webkit-scrollbar-thumb {
-  background: #2A2A3A;
+  background: var(--hawk-border);
   border-radius: 3px;
 }

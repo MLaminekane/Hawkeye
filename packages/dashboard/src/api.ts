@@ -72,6 +72,19 @@ export interface SettingsData {
   }>;
 }
 
+export interface GlobalStatsData {
+  total_sessions: number;
+  active_sessions: number;
+  completed_sessions: number;
+  aborted_sessions: number;
+  total_actions: number;
+  total_cost_usd: number;
+  avg_drift_score: number;
+  total_tokens: number;
+  first_session: string | null;
+  last_session: string | null;
+}
+
 export const api = {
   listSessions: (limit = 50) =>
     fetchJson<SessionData[]>(`${API_BASE}/sessions?limit=${limit}`),
@@ -93,4 +106,83 @@ export const api = {
 
   getProviders: () =>
     fetchJson<Record<string, string[]>>(`${API_BASE}/providers`),
+
+  getStats: () =>
+    fetchJson<GlobalStatsData>(`${API_BASE}/stats`),
 };
+
+// ─── WebSocket client ────────────────────────────────────────
+
+export type WsMessage =
+  | { type: 'event'; sessionId: string; event: EventData }
+  | { type: 'drift_update'; sessionId: string; score: number; flag: string; reason: string }
+  | { type: 'session_start'; session: SessionData }
+  | { type: 'session_end'; session: SessionData }
+  | { type: 'guardrail_violation'; sessionId: string; violation: Record<string, unknown> };
+
+type WsListener = (msg: WsMessage) => void;
+
+class HawkeyeWs {
+  private ws: WebSocket | null = null;
+  private listeners = new Set<WsListener>();
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private url: string;
+
+  constructor() {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.url = `${proto}//${window.location.host}/ws`;
+  }
+
+  connect(): void {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    try {
+      this.ws = new WebSocket(this.url);
+
+      this.ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data as string) as WsMessage;
+          for (const fn of this.listeners) {
+            fn(msg);
+          }
+        } catch {}
+      };
+
+      this.ws.onclose = () => {
+        this.scheduleReconnect();
+      };
+
+      this.ws.onerror = () => {
+        this.ws?.close();
+      };
+    } catch {
+      this.scheduleReconnect();
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, 3000);
+  }
+
+  subscribe(fn: WsListener): () => void {
+    this.listeners.add(fn);
+    this.connect();
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  disconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.ws?.close();
+    this.ws = null;
+  }
+}
+
+export const hawkeyeWs = new HawkeyeWs();

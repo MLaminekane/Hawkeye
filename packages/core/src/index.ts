@@ -18,7 +18,7 @@ export type {
 } from './types.js';
 
 export { Storage } from './storage/sqlite.js';
-export type { SessionRow, EventRow } from './storage/sqlite.js';
+export type { SessionRow, EventRow, GlobalStats } from './storage/sqlite.js';
 
 export { createRecorder } from './recorder.js';
 export type { Recorder, RecorderOptions, EventHandler, DriftAlertHandler, GuardrailViolationHandler } from './recorder.js';

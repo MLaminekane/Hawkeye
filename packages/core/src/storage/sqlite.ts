@@ -309,7 +309,42 @@ export class Storage {
     }
   }
 
+  getGlobalStats(): Result<GlobalStats> {
+    try {
+      const row = this.db.prepare(`
+        SELECT
+          COUNT(*) as total_sessions,
+          SUM(CASE WHEN status = 'recording' THEN 1 ELSE 0 END) as active_sessions,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_sessions,
+          SUM(CASE WHEN status = 'aborted' THEN 1 ELSE 0 END) as aborted_sessions,
+          COALESCE(SUM(total_actions), 0) as total_actions,
+          COALESCE(SUM(total_cost_usd), 0) as total_cost_usd,
+          COALESCE(AVG(CASE WHEN final_drift_score IS NOT NULL THEN final_drift_score END), 0) as avg_drift_score,
+          COALESCE(SUM(total_tokens), 0) as total_tokens,
+          MIN(started_at) as first_session,
+          MAX(started_at) as last_session
+        FROM sessions
+      `).get() as GlobalStats;
+      return { ok: true, value: row };
+    } catch (e) {
+      return { ok: false, error: e as Error };
+    }
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+export interface GlobalStats {
+  total_sessions: number;
+  active_sessions: number;
+  completed_sessions: number;
+  aborted_sessions: number;
+  total_actions: number;
+  total_cost_usd: number;
+  avg_drift_score: number;
+  total_tokens: number;
+  first_session: string | null;
+  last_session: string | null;
 }

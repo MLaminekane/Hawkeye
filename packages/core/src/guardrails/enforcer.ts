@@ -11,6 +11,7 @@ export interface GuardrailEnforcer {
   evaluate(event: TraceEvent): GuardrailViolation[];
   onViolation(callback: ViolationCallback): void;
   checkCostLimit(currentCostUsd: number, sessionStartTime: Date): GuardrailViolation | null;
+  checkTokenLimit(currentTokens: number): GuardrailViolation | null;
 }
 
 function matchesGlob(filePath: string, pattern: string): boolean {
@@ -192,6 +193,23 @@ export function createGuardrailEnforcer(
               };
             }
           }
+        }
+      }
+
+      return null;
+    },
+
+    checkTokenLimit(currentTokens: number): GuardrailViolation | null {
+      for (const rule of rules) {
+        if (rule.type !== 'token_limit') continue;
+
+        if (currentTokens >= rule.maxTokensPerSession) {
+          return {
+            ruleName: rule.name,
+            severity: rule.action,
+            description: `Session token limit exceeded: ${currentTokens} >= ${rule.maxTokensPerSession}`,
+            actionTaken: rule.action === 'block' ? 'session_aborted' : 'logged',
+          };
         }
       }
 

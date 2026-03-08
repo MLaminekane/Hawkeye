@@ -49,7 +49,9 @@ interface Key {
 const COMMANDS: SlashCommand[] = [
   { name: 'sessions', desc: 'List & manage sessions' },
   { name: 'active', desc: 'Current recording' },
-  { name: 'stats', desc: 'Session statistics' },
+  { name: 'stats', desc: 'Session or global statistics' },
+  { name: 'replay', desc: 'Replay a session (interactive)' },
+  { name: 'export', desc: 'Export session as JSON' },
   { name: 'end', desc: 'End active sessions' },
   { name: 'restart', desc: 'Restart a session' },
   { name: 'delete', desc: 'Delete a session' },
@@ -441,6 +443,10 @@ async function executeCommand(cmd: string, dbPath: string, cwd: string): Promise
     cmdActive(dbPath);
   } else if (c === 'stats') {
     await cmdStats(dbPath, args);
+  } else if (c === 'replay') {
+    await cmdReplay(dbPath, args);
+  } else if (c === 'export') {
+    await cmdExport(dbPath, args);
   } else if (c === 'end') {
     cmdEnd(dbPath, args);
   } else if (c === 'restart') {
@@ -503,12 +509,58 @@ function cmdActive(dbPath: string): void {
 }
 
 async function cmdStats(dbPath: string, sid: string): Promise<void> {
-  if (!sid) {
-    sid = await pickSession(dbPath);
-    if (!sid) return;
-  }
   const db = getStorage(dbPath);
   if (!db) return;
+
+  if (!sid) {
+    // Offer global stats or session pick
+    console.log('');
+    console.log(`  ${o.bold('0)')} ${o('Global stats (all sessions)')}`);
+    const r = db.listSessions({ limit: 10 });
+    const sessions = r.ok ? r.value : [];
+    for (let i = 0; i < sessions.length; i++) {
+      const s = sessions[i];
+      console.log(
+        `  ${o.bold(`${i + 1})`)} ${badge(s.status)}  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.white(s.objective.slice(0, 40))}`,
+      );
+    }
+    console.log('');
+    const pick = await ask(`  ${o('›')} `);
+    const idx = parseInt(pick, 10);
+
+    if (idx === 0 || pick === '') {
+      // Global stats
+      const gs = db.getGlobalStats();
+      db.close();
+      if (!gs.ok) {
+        console.log(chalk.red('  Could not load global stats'));
+        return;
+      }
+      const g = gs.value;
+      console.log('');
+      console.log(chalk.bold.white('  Global Statistics'));
+      console.log(chalk.dim('  ─'.repeat(20)));
+      console.log(`  ${chalk.dim('Sessions:')}     ${o.bold(String(g.total_sessions))} ${chalk.dim(`(${g.active_sessions} active, ${g.completed_sessions} completed, ${g.aborted_sessions} aborted)`)}`);
+      console.log(`  ${chalk.dim('Actions:')}      ${o.bold(String(g.total_actions))}`);
+      console.log(`  ${chalk.dim('Total cost:')}   ${chalk.hex('#FFB443')('$' + g.total_cost_usd.toFixed(4))}`);
+      console.log(`  ${chalk.dim('Total tokens:')} ${o.bold(g.total_tokens.toLocaleString())}`);
+      if (g.avg_drift_score > 0) {
+        const dColor = g.avg_drift_score >= 70 ? chalk.green : g.avg_drift_score >= 40 ? chalk.yellow : chalk.red;
+        console.log(`  ${chalk.dim('Avg drift:')}    ${dColor(g.avg_drift_score.toFixed(0) + '/100')}`);
+      }
+      if (g.first_session) console.log(`  ${chalk.dim('First:')}        ${chalk.dim(g.first_session)}`);
+      if (g.last_session) console.log(`  ${chalk.dim('Last:')}         ${chalk.dim(g.last_session)}`);
+      return;
+    }
+
+    if (idx >= 1 && idx <= sessions.length) {
+      sid = sessions[idx - 1].id;
+    } else {
+      db.close();
+      return;
+    }
+  }
+
   const sr = db.getSession(sid);
   if (!sr.ok || !sr.value) {
     console.log(chalk.red(`  Not found: ${sid}`));
@@ -649,6 +701,55 @@ async function cmdDelete(dbPath: string, args: string): Promise<void> {
   db.close();
 }
 
+async function cmdReplay(dbPath: string, args: string): Promise<void> {
+  let sid = args;
+  if (!sid) {
+    sid = await pickSession(dbPath);
+    if (!sid) return;
+  }
+  const db = getStorage(dbPath);
+  if (!db) return;
+  const r = db.getSession(sid);
+  if (!r.ok || !r.value) {
+    console.log(chalk.red(`  Not found: ${sid}`));
+    db.close();
+    return;
+  }
+  db.close();
+
+  console.log(chalk.dim(`  Launching interactive replay for ${r.value.id.slice(0, 8)}...`));
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, [process.argv[1], 'replay', r.value.id, '--interactive'], {
+    stdio: 'inherit',
+  });
+  await new Promise<void>((res) => child.on('close', () => res()));
+}
+
+async function cmdExport(dbPath: string, args: string): Promise<void> {
+  let sid = args;
+  if (!sid) {
+    sid = await pickSession(dbPath);
+    if (!sid) return;
+  }
+  const db = getStorage(dbPath);
+  if (!db) return;
+  const sr = db.getSession(sid);
+  if (!sr.ok || !sr.value) {
+    console.log(chalk.red(`  Not found: ${sid}`));
+    db.close();
+    return;
+  }
+  const ev = db.getEvents(sr.value.id);
+  db.close();
+  const events = ev.ok ? ev.value : [];
+
+  const output = {
+    session: sr.value,
+    events,
+  };
+  console.log(JSON.stringify(output, null, 2));
+}
+
 // ─── Settings command ────────────────────────────────────────
 
 async function cmdSettings(cwd: string): Promise<void> {
@@ -706,7 +807,8 @@ async function settingsDrift(config: HawkeyeConfig, cwd: string): Promise<void> 
     console.log(`  ${o.bold('5)')} Context window  ${chalk.white(String(d.contextWindow))} events`);
     console.log(`  ${o.bold('6)')} Warning at      ${chalk.yellow(`≤ ${d.warningThreshold}`)}`);
     console.log(`  ${o.bold('7)')} Critical at     ${chalk.red(`≤ ${d.criticalThreshold}`)}`);
-    console.log(`  ${o.bold('8)')} ${chalk.dim('Back')}`);
+    console.log(`  ${o.bold('8)')} Auto-pause      ${d.autoPause ? chalk.green('ON') : chalk.red('OFF')}`);
+    console.log(`  ${o.bold('9)')} ${chalk.dim('Back')}`);
     console.log('');
 
     const pick = await ask(`  ${o('›')} `);
@@ -776,6 +878,10 @@ async function settingsDrift(config: HawkeyeConfig, cwd: string): Promise<void> 
         saveConfig(cwd, config);
         console.log(chalk.green(`  ✓ Critical at ≤ ${n}`));
       }
+    } else if (pick === '8') {
+      d.autoPause = !d.autoPause;
+      saveConfig(cwd, config);
+      console.log(chalk.green(`  ✓ Auto-pause ${d.autoPause ? 'enabled' : 'disabled'}`));
     } else {
       break;
     }

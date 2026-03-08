@@ -1,28 +1,61 @@
 import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { api, type SessionData } from '../api';
+import { api, hawkeyeWs, type SessionData, type GlobalStatsData } from '../api';
+
+type SortKey = 'date' | 'actions' | 'cost' | 'drift';
+type SortDir = 'asc' | 'desc';
 
 export function SessionsPage() {
   const [sessions, setSessions] = useState<SessionData[]>([]);
+  const [stats, setStats] = useState<GlobalStatsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>('date');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [driftMin, setDriftMin] = useState('');
+  const [driftMax, setDriftMax] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
 
   useEffect(() => {
     const load = () => {
-      api.listSessions().then((data) => {
-        setSessions(data);
-        setLoading(false);
-      }).catch(() => setLoading(false));
+      Promise.all([api.listSessions(200), api.getStats()])
+        .then(([data, s]) => {
+          setSessions(data);
+          setStats(s);
+          setLoading(false);
+        })
+        .catch(() => setLoading(false));
     };
     load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
+
+    const unsub = hawkeyeWs.subscribe((msg) => {
+      if (msg.type === 'event' || msg.type === 'drift_update') {
+        load();
+      }
+    });
+
+    return () => { unsub(); };
   }, []);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  };
 
   const filtered = useMemo(() => {
     let result = sessions;
+
+    // Status filter
     if (statusFilter) result = result.filter((s) => s.status === statusFilter);
+
+    // Text search
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter((s) =>
@@ -31,8 +64,49 @@ export function SessionsPage() {
         s.id.includes(q)
       );
     }
+
+    // Date range filter
+    if (dateFrom) {
+      const from = new Date(dateFrom).getTime();
+      result = result.filter((s) => new Date(s.started_at).getTime() >= from);
+    }
+    if (dateTo) {
+      const to = new Date(dateTo).getTime() + 86400000; // include full day
+      result = result.filter((s) => new Date(s.started_at).getTime() <= to);
+    }
+
+    // Drift range filter
+    if (driftMin) {
+      const min = parseFloat(driftMin);
+      result = result.filter((s) => s.final_drift_score != null && s.final_drift_score >= min);
+    }
+    if (driftMax) {
+      const max = parseFloat(driftMax);
+      result = result.filter((s) => s.final_drift_score != null && s.final_drift_score <= max);
+    }
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case 'date':
+          cmp = new Date(a.started_at).getTime() - new Date(b.started_at).getTime();
+          break;
+        case 'actions':
+          cmp = a.total_actions - b.total_actions;
+          break;
+        case 'cost':
+          cmp = a.total_cost_usd - b.total_cost_usd;
+          break;
+        case 'drift':
+          cmp = (a.final_drift_score ?? -1) - (b.final_drift_score ?? -1);
+          break;
+      }
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+
     return result;
-  }, [sessions, statusFilter, search]);
+  }, [sessions, statusFilter, search, sortKey, sortDir, dateFrom, dateTo, driftMin, driftMax]);
 
   if (loading) {
     return <div className="text-hawk-text3 font-mono text-sm p-8">Loading...</div>;
@@ -61,13 +135,28 @@ export function SessionsPage() {
 
   return (
     <div>
+      {/* ─── Global Stats Cards ─── */}
+      {stats && (
+        <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatCard label="Sessions" value={String(stats.total_sessions)} sub={`${stats.active_sessions} active`} color="text-hawk-orange" />
+          <StatCard label="Total Cost" value={`$${stats.total_cost_usd.toFixed(2)}`} sub={`${stats.total_tokens.toLocaleString()} tokens`} color="text-hawk-amber" />
+          <StatCard label="Actions" value={String(stats.total_actions)} sub={`${(stats.total_actions / Math.max(stats.total_sessions, 1)).toFixed(0)} avg/session`} color="text-hawk-text" />
+          <StatCard
+            label="Avg Drift"
+            value={`${stats.avg_drift_score.toFixed(0)}/100`}
+            sub={stats.avg_drift_score >= 70 ? 'healthy' : stats.avg_drift_score >= 40 ? 'attention needed' : 'critical'}
+            color={stats.avg_drift_score >= 70 ? 'text-hawk-green' : stats.avg_drift_score >= 40 ? 'text-hawk-amber' : 'text-hawk-red'}
+          />
+        </div>
+      )}
+
       <div className="mb-4 flex items-center justify-between">
         <h1 className="font-display text-2xl font-bold text-hawk-text">Sessions</h1>
         <span className="font-mono text-xs text-hawk-text3">{sessions.length} total</span>
       </div>
 
-      {/* Search + Filters */}
-      <div className="mb-4 flex items-center gap-3">
+      {/* Search + Status Filters */}
+      <div className="mb-3 flex items-center gap-3">
         <input
           type="text"
           placeholder="Search objectives, agents..."
@@ -92,6 +181,51 @@ export function SessionsPage() {
             ) : null
           ))}
         </div>
+        <button
+          onClick={() => setShowFilters(!showFilters)}
+          className={`rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold transition-all ${showFilters ? 'bg-hawk-orange text-black' : 'bg-hawk-surface text-hawk-text3 hover:bg-hawk-surface2'}`}
+        >
+          Filters
+        </button>
+      </div>
+
+      {/* ─── Advanced Filters ─── */}
+      {showFilters && (
+        <div className="mb-4 rounded-lg border border-hawk-border bg-hawk-surface p-3 flex flex-wrap gap-4 font-mono text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-hawk-text3">From:</span>
+            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+              className="rounded bg-hawk-surface2 border border-hawk-border px-2 py-1 text-hawk-text outline-none" />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-hawk-text3">To:</span>
+            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+              className="rounded bg-hawk-surface2 border border-hawk-border px-2 py-1 text-hawk-text outline-none" />
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-hawk-text3">Drift:</span>
+            <input type="number" min="0" max="100" placeholder="min" value={driftMin} onChange={(e) => setDriftMin(e.target.value)}
+              className="w-14 rounded bg-hawk-surface2 border border-hawk-border px-2 py-1 text-hawk-text outline-none" />
+            <span className="text-hawk-text3">–</span>
+            <input type="number" min="0" max="100" placeholder="max" value={driftMax} onChange={(e) => setDriftMax(e.target.value)}
+              className="w-14 rounded bg-hawk-surface2 border border-hawk-border px-2 py-1 text-hawk-text outline-none" />
+          </div>
+          {(dateFrom || dateTo || driftMin || driftMax) && (
+            <button onClick={() => { setDateFrom(''); setDateTo(''); setDriftMin(''); setDriftMax(''); }}
+              className="text-hawk-red hover:underline">Clear</button>
+          )}
+        </div>
+      )}
+
+      {/* ─── Sort Bar ─── */}
+      <div className="mb-2 flex items-center gap-4 font-mono text-[10px] text-hawk-text3">
+        <span className="text-hawk-text3">Sort:</span>
+        {([['date', 'Date'], ['actions', 'Actions'], ['cost', 'Cost'], ['drift', 'Drift']] as const).map(([key, label]) => (
+          <button key={key} onClick={() => toggleSort(key)}
+            className={`transition-colors ${sortKey === key ? 'text-hawk-orange font-bold' : 'hover:text-hawk-text'}`}>
+            {label} {sortKey === key ? (sortDir === 'desc' ? '↓' : '↑') : ''}
+          </button>
+        ))}
       </div>
 
       <div className="space-y-3">
@@ -104,6 +238,16 @@ export function SessionsPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
+  return (
+    <div className="rounded-lg border border-hawk-border bg-hawk-surface p-4">
+      <div className="font-mono text-[10px] text-hawk-text3 uppercase mb-1">{label}</div>
+      <div className={`font-display text-xl font-bold ${color}`}>{value}</div>
+      <div className="font-mono text-[10px] text-hawk-text3 mt-0.5">{sub}</div>
     </div>
   );
 }

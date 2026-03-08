@@ -1,9 +1,14 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hawkeye</title>
+    <script>
+      // Restore saved theme before first paint to avoid flash
+      const t = localStorage.getItem('hawkeye-theme');
+      if (t === 'light') document.documentElement.classList.replace('dark', 'light');
+    </script>
   </head>
   <body>
     <div id="root"></div>

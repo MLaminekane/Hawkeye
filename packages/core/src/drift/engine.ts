@@ -112,6 +112,100 @@ function createOpenAIProvider(model: string): LlmProvider {
   };
 }
 
+function createDeepSeekProvider(model: string): LlmProvider {
+  return {
+    async complete(prompt: string): Promise<string> {
+      const apiKey = process.env.DEEPSEEK_API_KEY;
+      if (!apiKey) throw new Error('DEEPSEEK_API_KEY not set');
+
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 300,
+          temperature: 0.1,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`DeepSeek error: ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+      };
+      return data.choices[0].message.content;
+    },
+  };
+}
+
+function createMistralProvider(model: string): LlmProvider {
+  return {
+    async complete(prompt: string): Promise<string> {
+      const apiKey = process.env.MISTRAL_API_KEY;
+      if (!apiKey) throw new Error('MISTRAL_API_KEY not set');
+
+      const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          max_tokens: 300,
+          temperature: 0.1,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Mistral error: ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+      };
+      return data.choices[0].message.content;
+    },
+  };
+}
+
+function createGoogleProvider(model: string): LlmProvider {
+  return {
+    async complete(prompt: string): Promise<string> {
+      const apiKey = process.env.GOOGLE_API_KEY;
+      if (!apiKey) throw new Error('GOOGLE_API_KEY not set');
+
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 300 },
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`Google error: ${response.status}`);
+      }
+
+      const data = (await response.json()) as {
+        candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
+      };
+      return data.candidates[0].content.parts[0].text;
+    },
+  };
+}
+
 function formatEventsForPrompt(events: TraceEvent[]): string {
   return events
     .map((e, i) => {
@@ -172,6 +266,18 @@ export function createDriftEngine(
         case 'openai':
           llmProvider = createOpenAIProvider(config.model);
           logger.info(`DriftDetect: using OpenAI (${config.model})`);
+          break;
+        case 'deepseek':
+          llmProvider = createDeepSeekProvider(config.model);
+          logger.info(`DriftDetect: using DeepSeek (${config.model})`);
+          break;
+        case 'mistral':
+          llmProvider = createMistralProvider(config.model);
+          logger.info(`DriftDetect: using Mistral (${config.model})`);
+          break;
+        case 'google':
+          llmProvider = createGoogleProvider(config.model);
+          logger.info(`DriftDetect: using Google (${config.model})`);
           break;
       }
     } catch (err) {

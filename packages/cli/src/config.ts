@@ -11,6 +11,7 @@ export interface DriftSettings {
   warningThreshold: number;
   criticalThreshold: number;
   contextWindow: number;
+  autoPause?: boolean;
 }
 
 export interface GuardrailRuleSetting {
@@ -86,6 +87,7 @@ export function getDefaultConfig(): HawkeyeConfig {
       warningThreshold: 60,
       criticalThreshold: 30,
       contextWindow: 10,
+      autoPause: false,
     },
     guardrails: [
       {

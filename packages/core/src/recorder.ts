@@ -126,6 +126,7 @@ export function createRecorder(options: RecorderOptions): Recorder {
   let driftEngine: DriftEngine | null = null;
   let guardrailEnforcer: GuardrailEnforcer | null = null;
   let totalCostUsd = 0;
+  let totalTokens = 0;
   let paused = false;
 
   const eventHandlers: EventHandler[] = [];
@@ -179,6 +180,18 @@ export function createRecorder(options: RecorderOptions): Recorder {
         storage.insertGuardrailViolation(sessionId, event.id, costViolation);
         for (const handler of guardrailViolationHandlers) {
           handler(costViolation);
+        }
+      }
+
+      // Token limit check
+      if (type === 'llm_call' && 'totalTokens' in data) {
+        totalTokens += (data as LlmEvent).totalTokens;
+        const tokenViolation = guardrailEnforcer.checkTokenLimit(totalTokens);
+        if (tokenViolation) {
+          storage.insertGuardrailViolation(sessionId, event.id, tokenViolation);
+          for (const handler of guardrailViolationHandlers) {
+            handler(tokenViolation);
+          }
         }
       }
     }
@@ -273,6 +286,13 @@ export function createRecorder(options: RecorderOptions): Recorder {
 
           for (const handler of driftAlertHandlers) {
             handler(result);
+          }
+
+          // Auto-pause on critical drift if configured
+          if (driftConfig.autoPause && result.flag === 'critical' && !paused) {
+            logger.warn(`Auto-pausing session due to critical drift (score=${result.score})`);
+            paused = true;
+            session.status = 'paused';
           }
         });
         logger.info('DriftDetect enabled');

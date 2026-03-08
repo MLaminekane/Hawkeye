@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { randomUUID } from 'node:crypto';
 import { Storage } from '@hawkeye/core';
+import { WebSocketServer, type WebSocket } from 'ws';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -60,7 +61,7 @@ export const serveCommand = new Command('serve')
       // API routes
       if (url.startsWith('/api/')) {
         if (req.method === 'POST') {
-          handlePostApi(url, req, storage, res);
+          handlePostApi(url, req, storage, res, broadcast);
         } else {
           handleApi(url, storage, res);
         }
@@ -70,6 +71,67 @@ export const serveCommand = new Command('serve')
       // Static files
       serveStatic(url, dashboardDist, res);
     });
+
+    // ─── WebSocket Server ─────────────────────────────────────
+    const wss = new WebSocketServer({ noServer: true });
+    const wsClients = new Set<WebSocket>();
+
+    wss.on('connection', (ws) => {
+      wsClients.add(ws);
+      ws.on('close', () => wsClients.delete(ws));
+      ws.on('error', () => wsClients.delete(ws));
+    });
+
+    server.on('upgrade', (req, socket, head) => {
+      if (req.url === '/ws') {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          wss.emit('connection', ws, req);
+        });
+      } else {
+        socket.destroy();
+      }
+    });
+
+    function broadcast(msg: Record<string, unknown>): void {
+      const data = JSON.stringify(msg);
+      for (const ws of wsClients) {
+        if (ws.readyState === 1) {
+          ws.send(data);
+        }
+      }
+    }
+
+    // Poll for new events and broadcast to WebSocket clients
+    const sessionEventCounts = new Map<string, number>();
+    const pollInterval = setInterval(() => {
+      if (wsClients.size === 0) return;
+      try {
+        const sessionsResult = storage.listSessions({ status: 'recording', limit: 20 });
+        if (!sessionsResult.ok) return;
+        for (const s of sessionsResult.value) {
+          const eventsResult = storage.getEvents(s.id);
+          if (!eventsResult.ok) continue;
+          const prevCount = sessionEventCounts.get(s.id) || 0;
+          const newEvents = eventsResult.value.slice(prevCount);
+          sessionEventCounts.set(s.id, eventsResult.value.length);
+          for (const e of newEvents) {
+            broadcast({ type: 'event', sessionId: s.id, event: e });
+          }
+          // Broadcast drift updates
+          const driftResult = storage.getDriftSnapshots(s.id);
+          if (driftResult.ok && driftResult.value.length > 0) {
+            const latest = driftResult.value[driftResult.value.length - 1];
+            broadcast({
+              type: 'drift_update',
+              sessionId: s.id,
+              score: latest.score,
+              flag: latest.flag,
+              reason: latest.reason,
+            });
+          }
+        }
+      } catch {}
+    }, 1000);
 
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
@@ -86,6 +148,7 @@ export const serveCommand = new Command('serve')
       console.log(chalk.green('  Hawkeye Dashboard'));
       console.log(chalk.dim('  ─'.repeat(25)));
       console.log(`  ${chalk.dim('Local:')}   ${chalk.cyan(`http://localhost:${port}`)}`);
+      console.log(`  ${chalk.dim('WS:')}      ${chalk.cyan(`ws://localhost:${port}/ws`)}`);
       console.log(`  ${chalk.dim('DB:')}      ${chalk.dim(dbPath)}`);
       console.log('');
       console.log(chalk.dim('  Press Ctrl+C to stop'));
@@ -93,6 +156,8 @@ export const serveCommand = new Command('serve')
     });
 
     process.on('SIGINT', () => {
+      clearInterval(pollInterval);
+      wss.close();
       storage.close();
       server.close();
       process.exit(0);
@@ -199,6 +264,19 @@ function handleApi(url: string, storage: Storage, res: ServerResponse): void {
       return;
     }
 
+    // GET /api/stats — Global statistics
+    if (url === '/api/stats') {
+      const result = storage.getGlobalStats();
+      if (result.ok) {
+        res.writeHead(200);
+        res.end(JSON.stringify(result.value));
+      } else {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: result.error.message }));
+      }
+      return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Not found' }));
   } catch (err) {
@@ -217,7 +295,7 @@ function handleApi(url: string, storage: Storage, res: ServerResponse): void {
  * POST /api/sessions/:id/end — End a session
  *   Body: { status: "completed" | "aborted" }
  */
-function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse): void {
+function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res: ServerResponse, broadcast: (msg: Record<string, unknown>) => void): void {
   res.setHeader('Content-Type', 'application/json');
 
   let body = '';
@@ -270,6 +348,13 @@ function handlePostApi(url: string, req: IncomingMessage, storage: Storage, res:
         });
 
         if (insertResult.ok) {
+          // Broadcast immediately to WebSocket clients
+          broadcast({
+            type: 'event',
+            sessionId,
+            event: { id: eventId, session_id: sessionId, type: eventType, data: JSON.stringify(data), cost_usd: costUsd, duration_ms: durationMs, sequence, created_at: new Date().toISOString() },
+          });
+
           res.writeHead(200);
           res.end(JSON.stringify({
             ok: true,
@@ -358,9 +443,9 @@ function getDefaultConfig() {
       checkEvery: 5,
       provider: 'ollama',
       model: 'llama3.2',
-      warningThreshold: 60,
-      criticalThreshold: 30,
+      thresholds: { warning: 60, critical: 30 },
       contextWindow: 10,
+      autoPause: false,
     },
     guardrails: [
       {

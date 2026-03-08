@@ -8,6 +8,7 @@ export const sessionsCommand = new Command('sessions')
   .description('List recorded sessions')
   .option('-n, --last <count>', 'Show last N sessions', '10')
   .option('-s, --status <status>', 'Filter by status (recording, completed, aborted)')
+  .option('--json', 'Output as JSON for machine-readable export')
   .action((options) => {
     const dbPath = join(process.cwd(), '.hawkeye', 'traces.db');
 
@@ -31,7 +32,16 @@ export const sessionsCommand = new Command('sessions')
     const sessions = result.value;
 
     if (sessions.length === 0) {
-      console.log(chalk.dim('No sessions found.'));
+      if (options.json) {
+        console.log('[]');
+      } else {
+        console.log(chalk.dim('No sessions found.'));
+      }
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(sessions, null, 2));
       return;
     }
 

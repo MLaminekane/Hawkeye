@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import chalk from 'chalk';
 import { createRecorder, type DriftCheckResult, type GuardrailViolation } from '@hawkeye/core';
+import { RecordOverlay } from './record-overlay.js';
 
 export const recordCommand = new Command('record')
   .description('Record an AI agent session')
@@ -92,8 +93,23 @@ export const recordCommand = new Command('record')
         : { enabled: false, rules: [] },
     });
 
-    // Wire up drift alerts to CLI output
+    // Live terminal overlay
+    const overlay = new RecordOverlay({
+      sessionId: recorder.sessionId,
+      objective: options.objective,
+      agent,
+    });
+
+    let eventCount = 0;
+    let totalCostUsd = 0;
+
+    // Wire up drift alerts to overlay + CLI output
     recorder.onDriftAlert((result: DriftCheckResult) => {
+      overlay.update({ driftScore: result.score, driftFlag: result.flag });
+      if (result.flag === 'critical') {
+        overlay.update({ paused: true });
+      }
+      overlay.stop();
       console.error('');
       if (result.flag === 'critical') {
         console.error(chalk.red(`  ⚠ DRIFT CRITICAL — Score: ${result.score}/100`));
@@ -105,10 +121,12 @@ export const recordCommand = new Command('record')
         console.error(chalk.dim(`    Suggestion: ${result.suggestion}`));
       }
       console.error('');
+      overlay.start();
     });
 
-    // Wire up guardrail violations to CLI output
+    // Wire up guardrail violations
     recorder.onGuardrailViolation((violation: GuardrailViolation) => {
+      overlay.stop();
       console.error('');
       if (violation.severity === 'block') {
         console.error(chalk.red(`  ⛔ GUARDRAIL BLOCKED [${violation.ruleName}]`));
@@ -117,6 +135,14 @@ export const recordCommand = new Command('record')
       }
       console.error(chalk.dim(`    ${violation.description}`));
       console.error('');
+      overlay.start();
+    });
+
+    // Track events for overlay
+    recorder.onEvent((event) => {
+      eventCount++;
+      if (event.costUsd) totalCostUsd += event.costUsd;
+      overlay.update({ eventCount, costUsd: totalCostUsd, lastEventType: event.type });
     });
 
     recorder.start();
@@ -130,6 +156,8 @@ export const recordCommand = new Command('record')
     console.log(chalk.dim(`  Agent:      ${agent}`));
     console.log(chalk.dim(`  Drift:      ${driftStatus}  Guardrails: ${guardStatus}`));
     console.log('');
+
+    overlay.start();
 
     // Write the network preload script for child process interception
     const preloadPath = join(hawkDir, '_preload.mjs');
@@ -159,6 +187,7 @@ export const recordCommand = new Command('record')
     child.on('error', () => {});
 
     const cleanup = (status: 'completed' | 'aborted') => {
+      overlay.stop();
       recorder.stop(status);
       console.log('');
       console.log(

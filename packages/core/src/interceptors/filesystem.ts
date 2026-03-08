@@ -48,7 +48,7 @@ function computeHash(content: string | undefined): string | undefined {
   return createHash('sha256').update(content).digest('hex');
 }
 
-function computeLineDiff(before: string | undefined, after: string | undefined): { linesAdded: number; linesRemoved: number } {
+function computeLineDiff(before: string | undefined, after: string | undefined): { linesAdded: number; linesRemoved: number; diff: string } {
   const beforeLines = before ? before.split('\n') : [];
   const afterLines = after ? after.split('\n') : [];
   const beforeSet = new Set(beforeLines);
@@ -61,7 +61,52 @@ function computeLineDiff(before: string | undefined, after: string | undefined):
   for (const line of beforeLines) {
     if (!afterSet.has(line)) linesRemoved++;
   }
-  return { linesAdded, linesRemoved };
+  return { linesAdded, linesRemoved, diff: computeUnifiedDiff(beforeLines, afterLines) };
+}
+
+/**
+ * Compute a simple unified-style diff string from two arrays of lines.
+ * Produces hunks with context lines, prefixed with +/- markers.
+ */
+function computeUnifiedDiff(beforeLines: string[], afterLines: string[]): string {
+  // Simple LCS-based diff
+  const m = beforeLines.length;
+  const n = afterLines.length;
+  if (m === 0 && n === 0) return '';
+
+  // Build edit script using Myers-like approach (simple O(mn) DP)
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (beforeLines[i] === afterLines[j]) {
+        dp[i][j] = dp[i + 1][j + 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+
+  // Generate diff lines
+  const lines: string[] = [];
+  let i = 0, j = 0;
+  while (i < m || j < n) {
+    if (i < m && j < n && beforeLines[i] === afterLines[j]) {
+      lines.push(` ${beforeLines[i]}`);
+      i++; j++;
+    } else if (j < n && (i >= m || dp[i][j + 1] >= dp[i + 1][j])) {
+      lines.push(`+${afterLines[j]}`);
+      j++;
+    } else {
+      lines.push(`-${beforeLines[i]}`);
+      i++;
+    }
+  }
+
+  // Truncate to max 200 diff lines to avoid storing huge diffs
+  if (lines.length > 200) {
+    return lines.slice(0, 200).join('\n') + `\n... (${lines.length - 200} more lines)`;
+  }
+  return lines.join('\n');
 }
 
 export function createFilesystemInterceptor(
@@ -103,11 +148,12 @@ export function createFilesystemInterceptor(
       watcher.on('add', (filePath) => {
         logger.debug(`File created: ${filePath}`);
         const content = safeReadFile(filePath);
-        const { linesAdded, linesRemoved } = computeLineDiff(undefined, content);
+        const { linesAdded, linesRemoved, diff } = computeLineDiff(undefined, content);
         onEvent({
           path: filePath,
           action: 'write',
           contentAfter: content,
+          diff,
           linesAdded,
           linesRemoved,
           sizeBytes: safeStatSize(filePath),
@@ -120,13 +166,14 @@ export function createFilesystemInterceptor(
         logger.debug(`File modified: ${filePath}`);
         const contentBefore = fileSnapshots.get(filePath);
         const contentAfter = safeReadFile(filePath);
-        const { linesAdded, linesRemoved } = computeLineDiff(contentBefore, contentAfter);
+        const { linesAdded, linesRemoved, diff } = computeLineDiff(contentBefore, contentAfter);
 
         onEvent({
           path: filePath,
           action: 'write',
           contentBefore,
           contentAfter,
+          diff,
           linesAdded,
           linesRemoved,
           sizeBytes: safeStatSize(filePath),

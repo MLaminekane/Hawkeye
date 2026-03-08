@@ -1,0 +1,85 @@
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import type { CommandEvent } from '../types.js';
+import { Logger } from '../logger.js';
+
+const logger = new Logger('interceptor:terminal');
+
+const SENSITIVE_PATTERNS = [
+  /--token[= ]\S+/gi,
+  /--password[= ]\S+/gi,
+  /--secret[= ]\S+/gi,
+  /[A-Z_]*API_KEY[= ]\S+/gi,
+  /[A-Z_]*SECRET[= ]\S+/gi,
+  /Bearer\s+\S+/gi,
+];
+
+function sanitize(text: string): string {
+  let result = text;
+  for (const pattern of SENSITIVE_PATTERNS) {
+    result = result.replace(pattern, '[REDACTED]');
+  }
+  return result;
+}
+
+function truncate(text: string, maxBytes: number = 10240): string {
+  if (text.length <= maxBytes) return text;
+  return text.slice(0, maxBytes) + `\n... [truncated, ${text.length} bytes total]`;
+}
+
+export type CommandCallback = (event: CommandEvent) => void;
+
+export interface TerminalInterceptor {
+  spawn(command: string, args: string[], options?: SpawnOptions): ChildProcess;
+  destroy(): void;
+}
+
+export function createTerminalInterceptor(onEvent: CommandCallback): TerminalInterceptor {
+  return {
+    spawn(command: string, args: string[], options?: SpawnOptions): ChildProcess {
+      const startTime = Date.now();
+      const cwd = (options?.cwd as string) ?? process.cwd();
+
+      logger.debug(`Spawning: ${command} ${args.join(' ')}`);
+
+      const child = spawn(command, args, {
+        ...options,
+        stdio: ['inherit', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        stdout += text;
+        process.stdout.write(chunk);
+      });
+
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString();
+        stderr += text;
+        process.stderr.write(chunk);
+      });
+
+      child.on('close', (exitCode) => {
+        const event: CommandEvent = {
+          command: sanitize(command),
+          args: args.map(sanitize),
+          cwd,
+          exitCode: exitCode ?? undefined,
+          stdout: truncate(sanitize(stdout)),
+          stderr: truncate(sanitize(stderr)),
+        };
+
+        logger.debug(`Command exited with code ${exitCode}: ${command}`);
+        onEvent(event);
+      });
+
+      return child;
+    },
+
+    destroy() {
+      logger.debug('Terminal interceptor destroyed');
+    },
+  };
+}

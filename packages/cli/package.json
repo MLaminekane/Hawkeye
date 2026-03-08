@@ -1,0 +1,26 @@
+{
+  "name": "@hawkeye/cli",
+  "version": "0.1.0",
+  "description": "CLI for Hawkeye",
+  "type": "module",
+  "bin": {
+    "hawkeye": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@hawkeye/core": "workspace:*",
+    "commander": "^12.1.0",
+    "chalk": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "vitest": "^2.1.8"
+  }
+}

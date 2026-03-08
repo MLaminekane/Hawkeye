@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event PostToolUse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/lamine/Documents/Projects/Hawkeye/packages/cli/dist/index.js hook-handler --event Stop"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+.hawkeye/
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Turbo
+.turbo/
+
+# Logs
+*.log

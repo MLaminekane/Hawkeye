@@ -1,0 +1,362 @@
+import { v4 as uuid } from 'uuid';
+import { execSync } from 'node:child_process';
+import { Storage } from './storage/sqlite.js';
+import {
+  createTerminalInterceptor,
+  type TerminalInterceptor,
+} from './interceptors/terminal.js';
+import {
+  createFilesystemInterceptor,
+  type FilesystemInterceptor,
+} from './interceptors/filesystem.js';
+import {
+  createNetworkInterceptor,
+  type NetworkInterceptor,
+} from './interceptors/network.js';
+import {
+  createDriftEngine,
+  type DriftEngine,
+  type DriftCheckResult,
+} from './drift/engine.js';
+import {
+  createGuardrailEnforcer,
+  type GuardrailEnforcer,
+} from './guardrails/enforcer.js';
+import type { GuardrailRuleConfig, GuardrailViolation } from './guardrails/rules.js';
+import { Logger } from './logger.js';
+import type {
+  AgentSession,
+  TraceEvent,
+  CommandEvent,
+  FileEvent,
+  LlmEvent,
+  ApiEvent,
+  DriftConfig,
+  Result,
+  EventType,
+} from './types.js';
+
+const logger = new Logger('recorder');
+
+export interface RecorderOptions {
+  objective: string;
+  agent: string;
+  model?: string;
+  workingDir: string;
+  dbPath: string;
+  ignoredPaths?: string[];
+  captureNetwork?: boolean;
+  capturePrompts?: boolean;
+  drift?: DriftConfig;
+  guardrails?: {
+    enabled: boolean;
+    rules: GuardrailRuleConfig[];
+  };
+}
+
+export type EventHandler = (event: TraceEvent) => void;
+export type DriftAlertHandler = (result: DriftCheckResult) => void;
+export type GuardrailViolationHandler = (violation: GuardrailViolation) => void;
+
+export interface Recorder {
+  readonly sessionId: string;
+  readonly session: AgentSession;
+  start(): void;
+  stop(status?: 'completed' | 'aborted'): Result<void>;
+  pause(): void;
+  resume(): void;
+  getTerminalInterceptor(): TerminalInterceptor;
+  recordLlmEvent(event: LlmEvent): void;
+  onEvent(handler: EventHandler): () => void;
+  onDriftAlert(handler: DriftAlertHandler): void;
+  onGuardrailViolation(handler: GuardrailViolationHandler): void;
+}
+
+function getGitInfo(cwd: string): { branch?: string; commit?: string } {
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const commit = execSync('git rev-parse --short HEAD', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return { branch, commit };
+  } catch {
+    return {};
+  }
+}
+
+const DEFAULT_DRIFT_CONFIG: DriftConfig = {
+  enabled: true,
+  checkEvery: 5,
+  provider: 'ollama',
+  model: 'llama3.2',
+  thresholds: { warning: 60, critical: 30 },
+  contextWindow: 10,
+  autoPause: false,
+};
+
+export function createRecorder(options: RecorderOptions): Recorder {
+  const storage = new Storage(options.dbPath);
+  const sessionId = uuid();
+  const gitInfo = getGitInfo(options.workingDir);
+
+  const session: AgentSession = {
+    id: sessionId,
+    objective: options.objective,
+    startedAt: new Date(),
+    status: 'recording',
+    metadata: {
+      agent: options.agent,
+      model: options.model,
+      workingDir: options.workingDir,
+      gitBranch: gitInfo.branch,
+      gitCommitBefore: gitInfo.commit,
+    },
+  };
+
+  const recentEvents: TraceEvent[] = [];
+  let fsInterceptor: FilesystemInterceptor | null = null;
+  let terminalInterceptor: TerminalInterceptor | null = null;
+  let networkInterceptor: NetworkInterceptor | null = null;
+  let driftEngine: DriftEngine | null = null;
+  let guardrailEnforcer: GuardrailEnforcer | null = null;
+  let totalCostUsd = 0;
+  let paused = false;
+
+  const eventHandlers: EventHandler[] = [];
+  const driftAlertHandlers: DriftAlertHandler[] = [];
+  const guardrailViolationHandlers: GuardrailViolationHandler[] = [];
+
+  function recordEvent(
+    type: TraceEvent['type'],
+    data: TraceEvent['data'],
+    durationMs: number = 0,
+    costUsd: number = 0,
+  ): void {
+    if (paused) {
+      logger.debug(`Event skipped (paused): ${type}`);
+      return;
+    }
+
+    const sequence = storage.getNextSequence(sessionId);
+    const event: TraceEvent = {
+      id: uuid(),
+      sessionId,
+      timestamp: new Date(),
+      sequence,
+      type,
+      data,
+      durationMs,
+      costUsd,
+    };
+
+    // Guardrails check (synchronous, before persisting)
+    if (guardrailEnforcer) {
+      const violations = guardrailEnforcer.evaluate(event);
+      for (const v of violations) {
+        // Persist violation
+        storage.insertGuardrailViolation(sessionId, event.id, v);
+
+        for (const handler of guardrailViolationHandlers) {
+          handler(v);
+        }
+
+        if (v.actionTaken === 'blocked') {
+          logger.warn(`Event blocked by guardrail: ${v.description}`);
+          event.type = 'guardrail_trigger';
+        }
+      }
+
+      // Cost limit check
+      totalCostUsd += costUsd;
+      const costViolation = guardrailEnforcer.checkCostLimit(totalCostUsd, session.startedAt);
+      if (costViolation) {
+        storage.insertGuardrailViolation(sessionId, event.id, costViolation);
+        for (const handler of guardrailViolationHandlers) {
+          handler(costViolation);
+        }
+      }
+    }
+
+    const result = storage.insertEvent(event);
+    if (!result.ok) {
+      logger.error(`Failed to insert event: ${result.error.message}`);
+      return;
+    }
+
+    logger.debug(`Event #${sequence} [${type}] recorded`);
+
+    // Notify event subscribers
+    for (const handler of eventHandlers) {
+      try { handler(event); } catch {}
+    }
+
+    // Track for drift detection
+    recentEvents.push(event);
+    if (recentEvents.length > (options.drift?.contextWindow ?? 10) * 2) {
+      recentEvents.splice(0, recentEvents.length - (options.drift?.contextWindow ?? 10) * 2);
+    }
+
+    // Drift check (async, non-blocking)
+    if (driftEngine) {
+      driftEngine.processEvent(event, recentEvents).catch((err) => {
+        logger.error(`Drift check error: ${String(err)}`);
+      });
+    }
+  }
+
+  return {
+    get sessionId() {
+      return sessionId;
+    },
+
+    get session() {
+      return session;
+    },
+
+    recordLlmEvent(event: LlmEvent): void {
+      recordEvent('llm_call', event, event.latencyMs, event.costUsd);
+    },
+
+    pause(): void {
+      if (paused) return;
+      paused = true;
+      session.status = 'paused';
+      logger.info('Session paused');
+    },
+
+    resume(): void {
+      if (!paused) return;
+      paused = false;
+      session.status = 'recording';
+      logger.info('Session resumed');
+    },
+
+    onEvent(handler: EventHandler): () => void {
+      eventHandlers.push(handler);
+      return () => {
+        const idx = eventHandlers.indexOf(handler);
+        if (idx >= 0) eventHandlers.splice(idx, 1);
+      };
+    },
+
+    onDriftAlert(handler: DriftAlertHandler): void {
+      driftAlertHandlers.push(handler);
+    },
+
+    onGuardrailViolation(handler: GuardrailViolationHandler): void {
+      guardrailViolationHandlers.push(handler);
+    },
+
+    start() {
+      logger.info(`Starting session ${sessionId}`);
+      logger.info(`Objective: ${options.objective}`);
+
+      const createResult = storage.createSession(session);
+      if (!createResult.ok) {
+        logger.error(`Failed to create session: ${createResult.error.message}`);
+        return;
+      }
+
+      // Initialize DriftDetect
+      const driftConfig = options.drift ?? DEFAULT_DRIFT_CONFIG;
+      if (driftConfig.enabled) {
+        driftEngine = createDriftEngine(driftConfig, options.objective, options.workingDir);
+        driftEngine.onAlert((result, eventId) => {
+          // Persist drift snapshot
+          storage.insertDriftSnapshot(sessionId, eventId, result);
+
+          for (const handler of driftAlertHandlers) {
+            handler(result);
+          }
+        });
+        logger.info('DriftDetect enabled');
+      }
+
+      // Initialize Guardrails
+      if (options.guardrails?.enabled && options.guardrails.rules.length > 0) {
+        guardrailEnforcer = createGuardrailEnforcer(
+          options.guardrails.rules,
+          options.workingDir,
+        );
+        logger.info(`Guardrails enabled (${options.guardrails.rules.length} rules)`);
+      }
+
+      // Filesystem interceptor
+      fsInterceptor = createFilesystemInterceptor(
+        options.workingDir,
+        (fileEvent: FileEvent) => {
+          const typeMap: Record<string, TraceEvent['type']> = {
+            read: 'file_read',
+            write: 'file_write',
+            delete: 'file_delete',
+            rename: 'file_rename',
+          };
+          recordEvent(typeMap[fileEvent.action] || 'file_write', fileEvent);
+        },
+        options.ignoredPaths,
+      );
+      fsInterceptor.start();
+
+      // Terminal interceptor
+      terminalInterceptor = createTerminalInterceptor((cmdEvent: CommandEvent) => {
+        recordEvent('command', cmdEvent);
+      });
+
+      // Network interceptor (captures LLM calls and API calls)
+      if (options.captureNetwork !== false) {
+        networkInterceptor = createNetworkInterceptor(
+          (llmEvent: LlmEvent) => {
+            recordEvent('llm_call', llmEvent, llmEvent.latencyMs, llmEvent.costUsd);
+          },
+          (apiEvent: ApiEvent) => {
+            recordEvent('api_call', apiEvent, apiEvent.latencyMs);
+          },
+          { capturePrompts: options.capturePrompts },
+        );
+        networkInterceptor.install();
+        logger.info('Network interceptor enabled');
+      }
+
+      logger.info('Recording started');
+    },
+
+    stop(status: 'completed' | 'aborted' = 'completed'): Result<void> {
+      logger.info(`Stopping session ${sessionId} (${status})`);
+
+      fsInterceptor?.stop();
+      terminalInterceptor?.destroy();
+      networkInterceptor?.uninstall();
+
+      // Save final drift score
+      if (driftEngine) {
+        const finalScore = driftEngine.getSlidingScore();
+        storage.updateFinalDriftScore(sessionId, finalScore);
+        logger.info(`Final drift score: ${finalScore}`);
+      }
+
+      const gitAfter = getGitInfo(options.workingDir);
+      const result = storage.endSession(sessionId, status, gitAfter.commit);
+
+      storage.close();
+
+      if (result.ok) {
+        logger.info('Session saved');
+      }
+
+      return result;
+    },
+
+    getTerminalInterceptor(): TerminalInterceptor {
+      if (!terminalInterceptor) {
+        throw new Error('Recorder not started. Call start() first.');
+      }
+      return terminalInterceptor;
+    },
+  };
+}
